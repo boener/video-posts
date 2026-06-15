@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Vertical Posts</title>
+<title>Video Posts</title>
 <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 <style>
 :root {
@@ -93,8 +93,8 @@ html, body {
   overflow: hidden;
 }
 
-#col-posts  { width: 25%; }
-#col-log    { width: 45%; }
+#col-posts    { width: 25%; }
+#col-log      { width: 45%; }
 #col-settings { width: 30%; border-right: none; }
 
 .col-header {
@@ -224,10 +224,10 @@ button:disabled {
   flex-shrink: 0;
 }
 
-.pill-pending   { background: #2a2d3a; color: var(--text-muted); }
+.pill-pending    { background: #2a2d3a; color: var(--text-muted); }
 .pill-processing { background: rgba(59,130,246,0.2); color: var(--processing); animation: pulse-pill 1.5s infinite; }
-.pill-done      { background: rgba(34,197,94,0.15); color: var(--success); }
-.pill-failed    { background: rgba(239,68,68,0.15); color: var(--error); }
+.pill-done       { background: rgba(34,197,94,0.15); color: var(--success); }
+.pill-failed     { background: rgba(239,68,68,0.15); color: var(--error); }
 
 @keyframes pulse-pill {
   0%, 100% { opacity: 1; }
@@ -374,7 +374,7 @@ button:disabled {
 <body>
 
 <div id="header">
-  <h1>Vertical Posts</h1>
+  <h1>Video Posts</h1>
   <div id="live-indicator">
     <div id="live-dot"></div>
     <span id="live-label">Idle</span>
@@ -437,9 +437,8 @@ button:disabled {
           <label>Script Writer</label>
           <select id="model-script" onchange="handleOther(this,'model-script-other')">
             <option value="anthropic/claude-sonnet-4-6">anthropic/claude-sonnet-4-6</option>
-            <option value="anthropic/claude-opus-4-5">anthropic/claude-opus-4-5</option>
+            <option value="anthropic/claude-opus-4-8">anthropic/claude-opus-4-8</option>
             <option value="openai/gpt-4o">openai/gpt-4o</option>
-            <option value="openai/gpt-4o-mini">openai/gpt-4o-mini</option>
             <option value="google/gemini-2.5-pro-preview">google/gemini-2.5-pro-preview</option>
             <option value="google/gemini-2.5-flash-preview">google/gemini-2.5-flash-preview</option>
             <option value="__other__">Other...</option>
@@ -450,6 +449,7 @@ button:disabled {
         <div class="field">
           <label>TTS</label>
           <select id="model-tts" onchange="handleOther(this,'model-tts-other')">
+            <option value="google/gemini-3.1-flash-tts-preview">google/gemini-3.1-flash-tts-preview</option>
             <option value="google/gemini-2.5-flash-preview-tts">google/gemini-2.5-flash-preview-tts</option>
             <option value="google/gemini-2.5-pro-preview-tts">google/gemini-2.5-pro-preview-tts</option>
             <option value="openai/tts-1">openai/tts-1</option>
@@ -460,29 +460,28 @@ button:disabled {
         </div>
 
         <div class="field">
-          <label>Image Generator</label>
-          <select id="model-image" onchange="handleOther(this,'model-image-other')">
-            <option value="google/gemini-2.0-flash-preview-image-generation">google/gemini-2.0-flash-preview-image-generation</option>
-            <option value="google/gemini-2.5-flash-preview-image-generation">google/gemini-2.5-flash-preview-image-generation</option>
-            <option value="openai/dall-e-3">openai/dall-e-3</option>
-            <option value="openai/dall-e-2">openai/dall-e-2</option>
+          <label>Video Generator</label>
+          <select id="model-video" onchange="handleOther(this,'model-video-other')">
+            <option value="kling/kling-video-1.0-standard-text2video">kling/kling-video-1.0-standard-text2video</option>
+            <option value="kling/kling-video-1.0-pro-text2video">kling/kling-video-1.0-pro-text2video</option>
+            <option value="minimax/video-01">minimax/video-01</option>
             <option value="__other__">Other...</option>
           </select>
-          <input type="text" id="model-image-other" class="other-input" placeholder="model string" style="display:none">
+          <input type="text" id="model-video-other" class="other-input" placeholder="model string" style="display:none">
         </div>
       </div>
 
       <div class="settings-section">
-        <h3>Video</h3>
+        <h3>Video Generation</h3>
 
         <div class="field">
-          <label>FPS</label>
-          <input type="text" id="ffmpeg-fps">
+          <label>Motion Style</label>
+          <textarea id="video-motion-style" rows="3"></textarea>
         </div>
 
         <div class="field">
-          <label>Ken Burns Scale</label>
-          <input type="text" id="ffmpeg-kenburns-scale">
+          <label>Duration Fallback (seconds)</label>
+          <input type="text" id="video-duration-fallback">
         </div>
       </div>
 
@@ -490,18 +489,13 @@ button:disabled {
         <h3>Script</h3>
 
         <div class="field">
-          <label>Min Duration (seconds)</label>
-          <input type="text" id="script-min-duration">
+          <label>Min Clips</label>
+          <input type="text" id="script-clips-min">
         </div>
 
         <div class="field">
-          <label>Max Duration (seconds)</label>
-          <input type="text" id="script-max-duration">
-        </div>
-
-        <div class="field">
-          <label>Segment Duration (seconds)</label>
-          <input type="text" id="script-segment-duration">
+          <label>Max Clips</label>
+          <input type="text" id="script-clips-max">
         </div>
       </div>
 
@@ -509,18 +503,8 @@ button:disabled {
         <h3>Prompts</h3>
 
         <div class="field">
-          <label>Image Style</label>
-          <textarea id="image-style" rows="4"></textarea>
-        </div>
-
-        <div class="field">
           <label>Voice Style</label>
-          <textarea id="voice-style" rows="4"></textarea>
-        </div>
-
-        <div class="field">
-          <label>Script Writer Prompt File</label>
-          <input type="text" id="prompt-file">
+          <textarea id="voice-style" rows="3"></textarea>
         </div>
       </div>
 
@@ -679,11 +663,9 @@ async function refreshPosts() {
     const li = document.querySelector(`li[data-post-id="${p.post_id}"]`);
     if (!li) return;
 
-    // Update pill
     const oldPill = li.querySelector('.pill');
     if (oldPill) oldPill.replaceWith(makePill(p.status));
 
-    // Update retry buttons
     const existing = li.querySelector('.retry-actions');
     if ((p.status === 'failed' || p.status === 'done') && !existing) {
       li.appendChild(makeRetryButtons(p.post_id));
@@ -718,7 +700,7 @@ function setRunning(running) {
 
 async function doRun() {
   const checked = [...document.querySelectorAll('#post-list input[type=checkbox]:checked')]
-    .map(c => parseInt(c.id.replace('chk-', '')));
+    .map(c => c.id.replace('chk-', ''));
   if (!checked.length) { alert('No posts selected'); return; }
 
   const res = await fetch('/api/run', {
@@ -825,45 +807,39 @@ async function loadConfig() {
 
   setSelectValue('model-script', 'model-script-other', cfg.models?.script_writer || '');
   setSelectValue('model-tts',    'model-tts-other',    cfg.models?.tts || '');
-  setSelectValue('model-image',  'model-image-other',  cfg.models?.image || '');
+  setSelectValue('model-video',  'model-video-other',  cfg.models?.video || '');
 
-  document.getElementById('ffmpeg-fps').value            = cfg.ffmpeg?.fps ?? 30;
-  document.getElementById('ffmpeg-kenburns-scale').value = cfg.ffmpeg?.kenburns_scale ?? 1.3;
+  document.getElementById('video-motion-style').value    = cfg.video_gen?.motion_style || '';
+  document.getElementById('video-duration-fallback').value = cfg.video_gen?.duration_fallback_seconds ?? 8;
 
-  document.getElementById('script-min-duration').value     = cfg.script?.target_duration_min_seconds ?? 150;
-  document.getElementById('script-max-duration').value     = cfg.script?.target_duration_max_seconds ?? 180;
-  document.getElementById('script-segment-duration').value = cfg.script?.target_segment_duration_seconds ?? 4;
+  document.getElementById('script-clips-min').value = cfg.script?.target_clips_min ?? 2;
+  document.getElementById('script-clips-max').value = cfg.script?.target_clips_max ?? 3;
 
-  document.getElementById('image-style').value  = cfg.images?.style_prompt_prefix || '';
-  document.getElementById('voice-style').value  = cfg.voice?.style_instructions || '';
-  document.getElementById('prompt-file').value  = cfg.paths?.script_writer_prompt || '';
+  document.getElementById('voice-style').value = cfg.voice?.style_instructions || '';
 
-  document.getElementById('rendering-mode').value    = cfg.rendering?.mode || 'local';
-  document.getElementById('rendering-host').value    = cfg.rendering?.remote_host || '';
-  document.getElementById('rendering-user').value    = cfg.rendering?.remote_user || '';
-  document.getElementById('rendering-port').value    = cfg.rendering?.remote_port || '';
+  document.getElementById('rendering-mode').value     = cfg.rendering?.mode || 'remote';
+  document.getElementById('rendering-host').value     = cfg.rendering?.remote_host || '';
+  document.getElementById('rendering-user').value     = cfg.rendering?.remote_user || '';
+  document.getElementById('rendering-port').value     = cfg.rendering?.remote_port || '';
   document.getElementById('rendering-work-dir').value = cfg.rendering?.remote_work_dir || '';
   toggleRemoteFields();
 }
 
 async function doSave() {
   const payload = {
-    'models.script_writer': getModelValue('model-script', 'model-script-other'),
-    'models.tts':           getModelValue('model-tts',    'model-tts-other'),
-    'models.image':         getModelValue('model-image',  'model-image-other'),
-    'ffmpeg.fps':            parseFloat(document.getElementById('ffmpeg-fps').value),
-    'ffmpeg.kenburns_scale': parseFloat(document.getElementById('ffmpeg-kenburns-scale').value),
-    'script.target_duration_min_seconds':     parseInt(document.getElementById('script-min-duration').value) || 150,
-    'script.target_duration_max_seconds':     parseInt(document.getElementById('script-max-duration').value) || 180,
-    'script.target_segment_duration_seconds': parseFloat(document.getElementById('script-segment-duration').value) || 4,
-    'images.style_prompt_prefix':   document.getElementById('image-style').value,
-    'voice.style_instructions':     document.getElementById('voice-style').value,
-    'paths.script_writer_prompt':   document.getElementById('prompt-file').value,
-    'rendering.mode':               document.getElementById('rendering-mode').value,
-    'rendering.remote_host':        document.getElementById('rendering-host').value,
-    'rendering.remote_user':        document.getElementById('rendering-user').value,
-    'rendering.remote_port':        parseInt(document.getElementById('rendering-port').value) || 22,
-    'rendering.remote_work_dir':    document.getElementById('rendering-work-dir').value,
+    'models.script_writer':              getModelValue('model-script', 'model-script-other'),
+    'models.tts':                        getModelValue('model-tts',    'model-tts-other'),
+    'models.video':                      getModelValue('model-video',  'model-video-other'),
+    'video_gen.motion_style':            document.getElementById('video-motion-style').value,
+    'video_gen.duration_fallback_seconds': parseFloat(document.getElementById('video-duration-fallback').value) || 8,
+    'script.target_clips_min':           parseInt(document.getElementById('script-clips-min').value) || 2,
+    'script.target_clips_max':           parseInt(document.getElementById('script-clips-max').value) || 3,
+    'voice.style_instructions':          document.getElementById('voice-style').value,
+    'rendering.mode':                    document.getElementById('rendering-mode').value,
+    'rendering.remote_host':             document.getElementById('rendering-host').value,
+    'rendering.remote_user':             document.getElementById('rendering-user').value,
+    'rendering.remote_port':             parseInt(document.getElementById('rendering-port').value) || 22,
+    'rendering.remote_work_dir':         document.getElementById('rendering-work-dir').value,
   };
 
   const statusEl = document.getElementById('save-status');
