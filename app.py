@@ -9,17 +9,15 @@ import threading
 import logging
 from flask import Flask, jsonify, request, render_template
 from flask_socketio import SocketIO, emit
-import psutil
-
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'vertical-posts-dashboard'
+app.config['SECRET_KEY'] = 'video-posts-dashboard'
 socketio = SocketIO(app, async_mode='eventlet', cors_allowed_origins='*')
 
-CONFIG_PATH = os.path.expanduser('~/vertical-posts/config.yaml')
+CONFIG_PATH = os.path.expanduser('~/video-posts/config.yaml')
 
 DB_OPTIONS = {
-    'karate':   '/mnt/storage/vertical-posts/data/blog_posts.db',
-    'kombativ': '/mnt/storage/vertical-posts/data/blog_posts_kombativ.db',
+    'karate':   '/mnt/storage/video-posts/data/blog_posts.db',
+    'kombativ': '/mnt/storage/video-posts/data/blog_posts_kombativ.db',
 }
 
 pipeline_process = None
@@ -101,21 +99,19 @@ def post_config():
     field_map = {
         'models.script_writer': ('models', 'script_writer'),
         'models.tts': ('models', 'tts'),
-        'models.image': ('models', 'image'),
+        'models.video': ('models', 'video'),
         'voice.narrator_voice': ('voice', 'narrator_voice'),
         'voice.style_instructions': ('voice', 'style_instructions'),
-        'images.style_prompt_prefix': ('images', 'style_prompt_prefix'),
-        'paths.script_writer_prompt': ('paths', 'script_writer_prompt'),
+        'video_gen.motion_style': ('video_gen', 'motion_style'),
+        'video_gen.duration_fallback_seconds': ('video_gen', 'duration_fallback_seconds'),
         'ffmpeg.fps': ('ffmpeg', 'fps'),
-        'ffmpeg.kenburns_scale': ('ffmpeg', 'kenburns_scale'),
         'rendering.mode': ('rendering', 'mode'),
         'rendering.remote_host': ('rendering', 'remote_host'),
         'rendering.remote_user': ('rendering', 'remote_user'),
         'rendering.remote_port': ('rendering', 'remote_port'),
         'rendering.remote_work_dir': ('rendering', 'remote_work_dir'),
-        'script.target_duration_min_seconds': ('script', 'target_duration_min_seconds'),
-        'script.target_duration_max_seconds': ('script', 'target_duration_max_seconds'),
-        'script.target_segment_duration_seconds': ('script', 'target_segment_duration_seconds'),
+        'script.target_clips_min': ('script', 'target_clips_min'),
+        'script.target_clips_max': ('script', 'target_clips_max'),
     }
 
     for key, (section, field) in field_map.items():
@@ -162,16 +158,19 @@ def retry():
 
     if mode == 'reset':
         cfg = load_config()
-        import shutil
-        for subdir in ('audio', 'images'):
+        import shutil, glob
+        for subdir in ('audio', 'video_clips'):
             d = os.path.join(os.path.expanduser(cfg['paths'][subdir]), str(post_id))
             if os.path.isdir(d):
                 shutil.rmtree(d)
         for path_key, filename in (('scripts', f'{post_id}-script.json'),
-                                   ('subtitles', f'{post_id}.ass'),
-                                   ('videos', f'{post_id}.mp4')):
+                                   ('subtitles', f'{post_id}.ass')):
             p = os.path.join(os.path.expanduser(cfg['paths'][path_key]), filename)
             if os.path.exists(p):
+                os.remove(p)
+        videos_dir = os.path.expanduser(cfg['paths']['videos'])
+        for pattern in (f'km{post_id}-*.mp4', f'ko{post_id}-*.mp4'):
+            for p in glob.glob(os.path.join(videos_dir, pattern)):
                 os.remove(p)
 
     conn = get_db()
@@ -231,8 +230,8 @@ def run_pipeline_thread(post_ids):
         socketio.emit('log', {'line': f'--- Starting post {post_id} ---'})
 
         cmd = [
-            os.path.expanduser('~/vertical-posts/venv/bin/python'),
-            os.path.expanduser('~/vertical-posts/pipeline.py'),
+            os.path.expanduser('~/video-posts/venv/bin/python'),
+            os.path.expanduser('~/video-posts/pipeline.py'),
             '--post-id', str(post_id),
             '--resume',
         ]
@@ -295,4 +294,4 @@ def on_connect():
 
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False)
+    socketio.run(app, host='0.0.0.0', port=5001, debug=False)

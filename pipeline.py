@@ -1,9 +1,8 @@
 """
-Vertical Posts Pipeline — converts blog posts to short vertical videos.
+Video Posts Pipeline — converts blog posts to short vertical videos using AI-generated video clips.
 """
 
 import asyncio
-import base64
 import json
 import logging
 import os
@@ -20,13 +19,12 @@ import subprocess
 import tempfile
 
 import aiohttp
-import psutil
 import yaml
 from faster_whisper import WhisperModel
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-CONFIG_PATH = os.path.expanduser("~/vertical-posts/config.yaml")
+CONFIG_PATH = os.path.expanduser("~/video-posts/config.yaml")
 
 
 def load_config():
@@ -67,7 +65,7 @@ log.info("Whisper model loaded.")
 def get_next_post(conn):
     cur = conn.cursor()
     cur.execute(
-        "SELECT * FROM blog_posts WHERE status = 'pending' ORDER BY post_id ASC LIMIT 1"
+        "SELECT * FROM blog_posts WHERE status = 'pending' ORDER BY CAST(post_id AS INTEGER) ASC LIMIT 1"
     )
     row = cur.fetchone()
     if row is None:
@@ -99,7 +97,8 @@ async def generate_script(post, cfg):
     post_id = post["post_id"]
     log.info("[%s] Generating script...", post_id)
 
-    with open(cfg["paths"]["script_writer_prompt"]) as f:
+    prompt_path = os.path.join(cfg["paths"]["prompts"], "script-writer.txt")
+    with open(prompt_path) as f:
         system_prompt = f.read()
 
     user_message = (
@@ -134,7 +133,6 @@ async def generate_script(post, cfg):
                     log.info("[%s] Script cost: $%s", post_id, cost)
 
         content = data["choices"][0]["message"]["content"]
-        # Strip markdown code fences if present
         content = content.strip()
         if content.startswith("```"):
             content = re.sub(r'^```[a-z]*\n?', '', content)
@@ -155,7 +153,7 @@ async def generate_script(post, cfg):
     return script
 
 
-# ── Step 3: Parallel asset generation ────────────────────────────────────────
+# ── Step 3: Audio generation ──────────────────────────────────────────────────
 
 
 def _pcm_to_mp3(pcm_bytes: bytes, sample_rate: int = 24000, channels: int = 1) -> bytes:
@@ -192,7 +190,6 @@ async def generate_audio(session, segment, post_id, cfg, sem, resume=False):
         "Authorization": f"Bearer {cfg['api']['openrouter_api_key']}",
         "Content-Type": "application/json",
     }
-    # Strip inline emotion tags (e.g. [surprised]) — not interpreted by OpenAI TTS
     tts_text = re.sub(r"\[.*?\]", "", segment["text"]).strip()
     payload = {
         "model": cfg["models"]["tts"],
@@ -227,127 +224,221 @@ async def generate_audio(session, segment, post_id, cfg, sem, resume=False):
                 raise
 
 
-async def generate_image(session, segment, post_id, cfg, sem, resume=False):
-    index = segment["index"]
-    out_dir = os.path.join(cfg["paths"]["images"], str(post_id))
-    out_path = os.path.join(out_dir, f"segment_{index}.jpg")
-
-    if resume and os.path.exists(out_path):
-        log.info("[%s] Image seg %d exists, skipping.", post_id, index)
-        return
-
-    img_cfg = cfg["images"]
-    prompt = (
-        f"{img_cfg['style_prompt_prefix']} {segment['image_prompt']} "
-        f"{img_cfg['resolution_width']}x{img_cfg['resolution_height']} pixels"
+def _get_audio_duration(audio_path):
+    """Return duration of an audio file in seconds using ffprobe."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
+        capture_output=True, text=True,
     )
+    return float(result.stdout.strip())
+
+
+# ── Step 4: Video clip generation ────────────────────────────────────────────
+
+
+async def submit_video_job(session, segment, duration_seconds, cfg):
+    """Submit a text-to-video job to OpenRouter and return the job ID or direct video URL."""
+    index = segment["index"]
+    post_id = segment.get("_post_id", "?")
+
+    motion_style = cfg["video_gen"]["motion_style"]
+    prompt = f"{motion_style}, {segment['video_prompt']}"
 
     headers = {
         "Authorization": f"Bearer {cfg['api']['openrouter_api_key']}",
         "Content-Type": "application/json",
     }
     payload = {
-        "model": cfg["models"]["image"],
+        "model": cfg["models"]["video"],
         "messages": [{"role": "user", "content": prompt}],
+        "duration": int(duration_seconds),
     }
-    base_url = cfg["api"]["openrouter_base_url"]
 
+    base_url = cfg["api"]["openrouter_base_url"]
     attempts = cfg["pipeline"]["retry_attempts"]
     backoff = cfg["pipeline"]["retry_backoff_seconds"]
+
     for attempt in range(attempts):
         try:
-            async with sem:
-                async with session.post(
-                    f"{base_url}/chat/completions", headers=headers, json=payload
-                ) as resp:
-                    if resp.status >= 400:
-                        body = await resp.text()
-                        raise RuntimeError(f"HTTP {resp.status}: {body[:500]}")
-                    data = await resp.json()
-                    cost = resp.headers.get("x-openrouter-cost")
-                    if cost:
-                        log.info("[%s] Image seg %d cost: $%s", post_id, index, cost)
+            async with session.post(
+                f"{base_url}/chat/completions", headers=headers, json=payload
+            ) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    raise RuntimeError(f"HTTP {resp.status}: {body[:500]}")
+                data = await resp.json()
+                cost = resp.headers.get("x-openrouter-cost")
+                if cost:
+                    log.info("[%s] Video seg %d job cost: $%s", post_id, index, cost)
 
-            # Parse base64 image — OpenRouter returns it in message.images or message.content
-            message = data["choices"][0]["message"]
-            img_bytes = None
+            # Some models return a generation ID, others return the video URL directly.
+            # Check for a direct video URL in the response first.
+            message = data.get("choices", [{}])[0].get("message", {})
+            content = message.get("content", "")
 
-            def _extract_parts(parts):
-                for part in parts:
-                    if not isinstance(part, dict):
-                        continue
-                    if part.get("type") == "image_url":
-                        url = part["image_url"]["url"]
-                        if url.startswith("data:"):
-                            return base64.b64decode(url.split(",", 1)[1])
-                    elif part.get("type") == "image":
-                        return base64.b64decode(part["data"])
-                return None
+            # If content is a URL pointing to a video file, return it directly
+            if isinstance(content, str) and (
+                content.startswith("http") and (
+                    ".mp4" in content or ".webm" in content or "video" in content.lower()
+                )
+            ):
+                log.info("[%s] Video seg %d: got direct URL from response.", post_id, index)
+                return content
 
-            # Check message.images first (Gemini sets content=null and puts image here)
-            if message.get("images"):
-                img_bytes = _extract_parts(message["images"])
+            # Check for a generation/job ID in the response
+            gen_id = (
+                data.get("id")
+                or data.get("generation_id")
+                or (data.get("choices", [{}])[0].get("message", {}).get("generation_id"))
+            )
+            if gen_id:
+                log.info("[%s] Video seg %d: job ID %s", post_id, index, gen_id)
+                return gen_id
 
-            # Fall back to message.content as list of parts
-            if img_bytes is None and isinstance(message.get("content"), list):
-                img_bytes = _extract_parts(message["content"])
+            # If neither, raise so we can debug
+            raise RuntimeError(f"Unexpected video gen response: {json.dumps(data)[:500]}")
 
-            # Fall back to message.content as string data URL
-            if img_bytes is None and isinstance(message.get("content"), str):
-                c = message["content"]
-                if c.startswith("data:"):
-                    img_bytes = base64.b64decode(c.split(",", 1)[1])
-                else:
-                    img_bytes = base64.b64decode(c)
-
-            if img_bytes is None:
-                raise ValueError(f"Could not extract image from response for seg {index}")
-
-            with open(out_path, "wb") as f:
-                f.write(img_bytes)
-            return
         except Exception as e:
             if attempt < attempts - 1:
-                log.warning("[%s] Image seg %d attempt %d failed: %s", post_id, index, attempt + 1, e)
+                log.warning("[%s] Video seg %d job submit attempt %d failed: %s", post_id, index, attempt + 1, e)
                 await asyncio.sleep(backoff * (attempt + 1))
             else:
                 raise
+
+
+async def poll_video_job(session, job_id_or_url, post_id, segment_index, cfg):
+    """Poll until video clip is ready, then download and save it. Returns local file path."""
+    out_dir = os.path.join(cfg["paths"]["video_clips"], str(post_id))
+    out_path = os.path.join(out_dir, f"segment_{segment_index}.mp4")
+
+    base_url = cfg["api"]["openrouter_base_url"]
+    headers = {
+        "Authorization": f"Bearer {cfg['api']['openrouter_api_key']}",
+    }
+
+    async def _download(video_url):
+        log.info("[%s] Video seg %d: downloading from %s", post_id, segment_index, video_url[:80])
+        async with session.get(video_url) as resp:
+            resp.raise_for_status()
+            data = await resp.read()
+        with open(out_path, "wb") as f:
+            f.write(data)
+        log.info("[%s] Video seg %d saved (%d bytes): %s", post_id, segment_index, len(data), out_path)
+        return out_path
+
+    # If we were given a direct URL, skip polling
+    if job_id_or_url.startswith("http"):
+        return await _download(job_id_or_url)
+
+    # Poll the generation endpoint
+    poll_url = f"{base_url}/generation/{job_id_or_url}"
+    deadline = time.time() + 15 * 60  # 15-minute timeout
+    poll_interval = 10
+
+    log.info("[%s] Video seg %d: polling job %s...", post_id, segment_index, job_id_or_url)
+    while time.time() < deadline:
+        await asyncio.sleep(poll_interval)
+        async with session.get(poll_url, headers=headers) as resp:
+            if resp.status == 404:
+                # Some APIs use a different status endpoint
+                log.warning("[%s] Video seg %d: poll 404, retrying in %ds...", post_id, segment_index, poll_interval)
+                continue
+            resp.raise_for_status()
+            data = await resp.json()
+
+        status = data.get("status", "")
+        video_url = (
+            data.get("video_url")
+            or data.get("url")
+            or (data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                if data.get("choices") else "")
+        )
+
+        if status in ("succeeded", "completed", "done") or (
+            isinstance(video_url, str) and video_url.startswith("http")
+        ):
+            if video_url and video_url.startswith("http"):
+                return await _download(video_url)
+            raise RuntimeError(f"Job succeeded but no video URL found: {json.dumps(data)[:300]}")
+
+        if status in ("failed", "error", "cancelled"):
+            raise RuntimeError(f"Video generation job failed: {json.dumps(data)[:300]}")
+
+        log.info("[%s] Video seg %d: status=%s, waiting...", post_id, segment_index, status or "pending")
+
+    raise RuntimeError(f"Video generation timed out after 15 minutes for seg {segment_index}")
+
+
+# ── Step 3+4 combined: generate all assets ────────────────────────────────────
 
 
 async def generate_all_assets(script, post_id, cfg, resume=False):
     log.info("[%s] Generating assets for %d segments (resume=%s)...", post_id, len(script["segments"]), resume)
 
     audio_dir = os.path.join(cfg["paths"]["audio"], str(post_id))
-    images_dir = os.path.join(cfg["paths"]["images"], str(post_id))
+    video_clips_dir = os.path.join(cfg["paths"]["video_clips"], str(post_id))
     os.makedirs(audio_dir, exist_ok=True)
-    os.makedirs(images_dir, exist_ok=True)
+    os.makedirs(video_clips_dir, exist_ok=True)
 
     sem = asyncio.Semaphore(cfg["pipeline"]["max_concurrent_requests"])
-    completed = {"audio": 0, "image": 0}
-    total = len(script["segments"])
+    segments = script["segments"]
+    total = len(segments)
 
-    async def audio_task(session, seg):
-        await generate_audio(session, seg, post_id, cfg, sem, resume=resume)
-        completed["audio"] += 1
-        log.info("[%s] Audio %d/%d done.", post_id, completed["audio"], total)
-
-    async def image_task(session, seg):
-        await generate_image(session, seg, post_id, cfg, sem, resume=resume)
-        completed["image"] += 1
-        log.info("[%s] Image %d/%d done.", post_id, completed["image"], total)
-
+    # Phase A: Audio
+    log.info("[%s] Phase A: generating TTS audio for %d segments...", post_id, total)
     connector = aiohttp.TCPConnector(limit=cfg["pipeline"]["max_concurrent_requests"])
     async with aiohttp.ClientSession(connector=connector) as session:
-        tasks = []
-        for seg in script["segments"]:
-            tasks.append(audio_task(session, seg))
-            tasks.append(image_task(session, seg))
-        await asyncio.gather(*tasks)
+        completed = {"audio": 0}
+
+        async def audio_task(seg):
+            await generate_audio(session, seg, post_id, cfg, sem, resume=resume)
+            completed["audio"] += 1
+            log.info("[%s] Audio %d/%d done.", post_id, completed["audio"], total)
+
+        await asyncio.gather(*[audio_task(seg) for seg in segments])
+
+    log.info("[%s] Phase A complete.", post_id)
+
+    # Measure actual audio durations
+    durations = {}
+    for seg in segments:
+        idx = seg["index"]
+        aud_path = os.path.join(audio_dir, f"segment_{idx}.mp3")
+        d = _get_audio_duration(aud_path)
+        # Enforce minimum duration for video generation APIs
+        durations[idx] = max(d, 5.0)
+        log.info("[%s] Seg %d audio duration: %.2fs (clamped to %.2fs)", post_id, idx, d, durations[idx])
+
+    # Phase B: Video clips
+    log.info("[%s] Phase B: generating video clips for %d segments...", post_id, total)
+    connector = aiohttp.TCPConnector(limit=cfg["pipeline"]["max_concurrent_requests"])
+    async with aiohttp.ClientSession(connector=connector) as session:
+        completed = {"video": 0}
+
+        async def video_task(seg):
+            idx = seg["index"]
+            clip_path = os.path.join(video_clips_dir, f"segment_{idx}.mp4")
+            if resume and os.path.exists(clip_path):
+                log.info("[%s] Video clip seg %d exists, skipping.", post_id, idx)
+                completed["video"] += 1
+                return
+
+            # Tag the segment with post_id for logging in submit_video_job
+            seg_tagged = dict(seg, _post_id=post_id)
+            async with sem:
+                job_id_or_url = await submit_video_job(session, seg_tagged, durations[idx], cfg)
+            await poll_video_job(session, job_id_or_url, post_id, idx, cfg)
+            completed["video"] += 1
+            log.info("[%s] Video %d/%d done.", post_id, completed["video"], total)
+
+        await asyncio.gather(*[video_task(seg) for seg in segments])
 
     log.info("[%s] All assets generated.", post_id)
+    return durations
 
 
-# ── Step 4: Whisper transcription ─────────────────────────────────────────────
+# ── Step 5: Whisper transcription ─────────────────────────────────────────────
 
 
 def transcribe_segments(script, post_id, cfg):
@@ -370,7 +461,7 @@ def transcribe_segments(script, post_id, cfg):
     return all_words
 
 
-# ── Step 5: Build ASS subtitle file ──────────────────────────────────────────
+# ── Step 6: Build ASS subtitle file ──────────────────────────────────────────
 
 
 def _ass_time(seconds):
@@ -401,7 +492,7 @@ def build_ass(script, word_timestamps, post_id, cfg):
         "Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV\n"
         f"Style: Default,{sub_cfg['font']},{sub_cfg['font_size']},"
         f"&H00FFFFFF,&H00000000,&H00000000,"
-        f"{bold},0,1,{sub_cfg['outline_thickness']},{sub_cfg['shadow_depth']},2,10,10,{margin_v}\n"
+        f"{bold},0,1,{sub_cfg['outline_width']},1,2,10,10,{margin_v}\n"
         "\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
@@ -412,8 +503,9 @@ def build_ass(script, word_timestamps, post_id, cfg):
 
     for seg_idx, (seg, words) in enumerate(zip(script["segments"], word_timestamps)):
         if not words:
-            # Advance timeline by a default if no words transcribed
-            timeline_offset += cfg["script"]["target_segment_duration_seconds"]
+            # Advance timeline by actual audio duration if no words transcribed
+            audio_path = os.path.join(cfg["paths"]["audio"], str(post_id), f"segment_{seg['index']}.mp3")
+            timeline_offset += _get_audio_duration(audio_path)
             continue
 
         seg_start = timeline_offset
@@ -421,7 +513,6 @@ def build_ass(script, word_timestamps, post_id, cfg):
 
         for wi, word_info in enumerate(words):
             w_start = timeline_offset + word_info["start"]
-            # Hold until next word starts (or segment ends for last word)
             if wi + 1 < len(words):
                 w_end = timeline_offset + words[wi + 1]["start"]
             else:
@@ -443,95 +534,41 @@ def build_ass(script, word_timestamps, post_id, cfg):
     return out_path
 
 
-# ── Step 6: FFmpeg assembly ───────────────────────────────────────────────────
+# ── Step 7: FFmpeg assembly ───────────────────────────────────────────────────
 
 
-def _get_audio_duration(audio_path):
-    """Return duration of an audio file in seconds using ffprobe."""
-    result = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-         "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
-        capture_output=True, text=True,
-    )
-    return float(result.stdout.strip())
-
-
-def _build_filter_script(segments, durations, subtitles_path, ff):
-    """Return the filter_complex script string with the given subtitles path."""
+def _build_video_filter(segments, audio_dir, video_clips_dir, post_id, subtitles_path, ff_cfg):
+    """Build an FFmpeg concat filter for video clips + audio, with subtitle burn-in."""
     escaped_subs = subtitles_path.replace("\\", "\\\\").replace(":", "\\:")
     n = len(segments)
-    fps = ff.get("fps", 30)
-    kb_scale = ff.get("kenburns_scale", 1.3)
-    out_w = ff["output_width"]
-    out_h = ff["output_height"]
-    src_w = int(out_w * kb_scale)
-    src_h = int(out_h * kb_scale)
-
-    # Ken Burns via 2× oversampled zoompan + Lanczos downscale.
-    #
-    # At 1× (src_w×src_h → out_w×out_h), integer pixel snapping in zoompan's
-    # x/y expressions creates staircase jitter: SSIM stddev ≈ 0.038 between
-    # consecutive frames. At 2×, the same zoom runs at twice the pixel resolution;
-    # a 2px step in 2× space becomes a Lanczos-interpolated sub-pixel shift in
-    # output space. Measured SSIM stddev drops to ≈ 0.010 — 4× smoother motion.
-    #
-    # Presets: (z_start, z_end, x_anchor, y_anchor)
-    _kb_presets = [
-        (1.0, 1.3, "center", "center"),   # zoom in, centered
-        (1.3, 1.0, "right",  "top"),      # zoom out from top-right
-        (1.0, 1.3, "left",   "bottom"),   # zoom in toward bottom-left
-        (1.3, 1.0, "center", "center"),   # zoom out, centered
-    ]
-
-    # 2× oversampled intermediate dimensions
-    os2_src_w = src_w * 2
-    os2_src_h = src_h * 2
-    os2_out_w = out_w * 2
-    os2_out_h = out_h * 2
 
     filter_lines = []
-    interleaved = []
-    for i in range(n):
-        vid_idx = i * 2
-        aud_idx = i * 2 + 1
-        dur = durations[i]
-        z0, z1, x_anchor, y_anchor = _kb_presets[i % len(_kb_presets)]
-        frames = max(1, int(dur * fps))
-        dz = z1 - z0
+    video_labels = []
+    audio_labels = []
 
-        # on/frames gives a linear zoom ramp that works for both zoom-in (dz>0)
-        # and zoom-out (dz<0).  Zoompan's initial zoom is 1.0, so accumulation
-        # can't start a zoom-out from 1.3; on/frames has no such initialization issue.
-        z_clamp = f"min(1.3,max(1.0,{z0}+on/{frames}*({dz:.4f})))"
+    for i, seg in enumerate(segments):
+        # Inputs are interleaved: [0]=clip0, [1]=audio0, [2]=clip1, [3]=audio1, ...
+        vid_in = i * 2
+        aud_in = i * 2 + 1
 
-        if x_anchor == "left":
-            x_expr = "0"
-        elif x_anchor == "right":
-            x_expr = "trunc(iw-ow/zoom)"
-        else:
-            x_expr = "trunc((iw-ow/zoom)/2)"
-
-        if y_anchor == "top":
-            y_expr = "0"
-        elif y_anchor == "bottom":
-            y_expr = "trunc(ih-oh/zoom)"
-        else:
-            y_expr = "trunc((ih-oh/zoom)/2)"
-
-        zoompan = (
-            f"zoompan=z='{z_clamp}':x='{x_expr}':y='{y_expr}'"
-            f":d={frames}:s={os2_out_w}x{os2_out_h}:fps={fps}"
-        )
-        trim = f"trim=duration={dur:.6f},setpts=PTS-STARTPTS"
-
+        # Scale to 1080x1920, preserving aspect ratio with padding
         filter_lines.append(
-            f"[{vid_idx}:v]fps={fps},scale={os2_src_w}:{os2_src_h}:flags=lanczos,"
-            f"{zoompan},"
-            f"scale={out_w}:{out_h}:flags=lanczos,"
-            f"{trim},setsar=1[vs{i}]"
+            f"[{vid_in}:v]"
+            f"scale=1080:1920:force_original_aspect_ratio=decrease,"
+            f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2,"
+            f"setsar=1,setpts=PTS-STARTPTS"
+            f"[vs{i}]"
         )
-        interleaved.append(f"[vs{i}]")
-        interleaved.append(f"[{aud_idx}:a]")
+        filter_lines.append(
+            f"[{aud_in}:a]atrim=start=0,asetpts=PTS-STARTPTS[as{i}]"
+        )
+        video_labels.append(f"[vs{i}]")
+        audio_labels.append(f"[as{i}]")
+
+    interleaved = []
+    for v, a in zip(video_labels, audio_labels):
+        interleaved.append(v)
+        interleaved.append(a)
 
     filter_lines.append(
         "".join(interleaved) + f"concat=n={n}:v=1:a=1[vout][aout]"
@@ -550,34 +587,44 @@ def _run_cmd(cmd, label):
     return result
 
 
+def _slug(title):
+    s = title.lower()
+    s = re.sub(r'[^a-z0-9]+', '-', s)
+    return s.strip('-')
+
+
+def _db_prefix(cfg):
+    db = cfg['paths']['db']
+    return 'ko' if 'kombativ' in db else 'km'
+
+
 def _assemble_video_remote(script, post_id, cfg, segments, durations,
-                            images_dir, audio_dir, subtitles_path, output_path, ff):
+                            video_clips_dir, audio_dir, subtitles_path, output_path, ff):
     r = cfg["rendering"]
     host = r["remote_host"]
     user = r["remote_user"]
     port = str(r["remote_port"])
     work_dir = r["remote_work_dir"].rstrip("/") + f"/{post_id}"
     remote = f"{user}@{host}"
-    # Keep-alive options prevent SSH dropping during long encodes
     ssh_opts = ["-p", port, "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=60"]
     ssh_base = ["ssh"] + ssh_opts + [remote]
 
     log.info("[%s] Remote rendering: %s:%s", post_id, remote, work_dir)
 
-    # Prepare remote work directory
     _run_cmd(ssh_base + ["mkdir", "-p", work_dir], "ssh mkdir")
 
     try:
-        # rsync images
-        img_files = [
-            os.path.join(images_dir, f"segment_{seg['index']}.jpg")
+        ssh_e = f"ssh {' '.join(ssh_opts)}"
+
+        # rsync video clips
+        clip_files = [
+            os.path.join(video_clips_dir, f"segment_{seg['index']}.mp4")
             for seg in segments
         ]
-        ssh_e = f"ssh {' '.join(ssh_opts)}"
-        log.info("[%s] rsync images (%d files)...", post_id, len(img_files))
+        log.info("[%s] rsync video clips (%d files)...", post_id, len(clip_files))
         _run_cmd(
-            ["rsync", "-a", "-e", ssh_e] + img_files + [f"{remote}:{work_dir}/"],
-            "rsync images",
+            ["rsync", "-a", "-e", ssh_e] + clip_files + [f"{remote}:{work_dir}/"],
+            "rsync video-clips",
         )
 
         # rsync audio
@@ -598,12 +645,17 @@ def _assemble_video_remote(script, post_id, cfg, segments, durations,
             "rsync subtitles",
         )
 
-        # Build fc.txt with remote paths
+        # Build filter with remote paths
         remote_subs = f"{work_dir}/{os.path.basename(subtitles_path)}"
-        filter_script = _build_filter_script(segments, durations, remote_subs, ff)
+
+        # Rewrite segment paths to remote equivalents for filter building
+        remote_video_clips_dir = work_dir
+        remote_audio_dir = work_dir
+        filter_script = _build_video_filter(
+            segments, remote_audio_dir, remote_video_clips_dir, post_id, remote_subs, ff
+        )
         remote_fc = f"{work_dir}/fc.txt"
 
-        # Write fc.txt locally then rsync it
         local_fc = os.path.join(cfg["paths"]["videos"], f"{post_id}_fc_remote.txt")
         with open(local_fc, "w") as f:
             f.write(filter_script)
@@ -618,13 +670,17 @@ def _assemble_video_remote(script, post_id, cfg, segments, durations,
             except OSError:
                 pass
 
-        # Build remote FFmpeg command
+        # Build remote FFmpeg command — video clip + audio input pairs
         remote_output = f"{work_dir}/output.mp4"
         ffmpeg_cmd = ["ffmpeg", "-y"]
-        for seg, duration in zip(segments, durations):
-            img = f"{work_dir}/segment_{seg['index']}.jpg"
-            aud = f"{work_dir}/segment_{seg['index']}.mp3"
-            ffmpeg_cmd += ["-loop", "1", "-t", f"{duration:.6f}", "-i", img, "-i", aud]
+        for seg in segments:
+            idx = seg["index"]
+            clip = f"{work_dir}/segment_{idx}.mp4"
+            aud = f"{work_dir}/segment_{idx}.mp3"
+            # Use -t to trim each clip to its audio duration
+            aud_dur = durations.get(idx, cfg["video_gen"]["duration_fallback_seconds"])
+            ffmpeg_cmd += ["-t", f"{aud_dur:.6f}", "-i", clip, "-t", f"{aud_dur:.6f}", "-i", aud]
+
         ffmpeg_cmd += [
             "-filter_complex_script", remote_fc,
             "-map", "[vfinal]",
@@ -634,12 +690,9 @@ def _assemble_video_remote(script, post_id, cfg, segments, durations,
             "-crf", str(ff.get("crf", 26)),
             "-pix_fmt", "yuv420p",
             "-c:a", ff["audio_codec"],
-            "-max_muxing_queue_size", str(ff["max_muxing_queue_size"]),
             remote_output,
         ]
 
-        # Run ffmpeg detached on the remote so the encode survives any SSH hiccup.
-        # ffmpeg writes a sentinel file (.done or .failed) when it finishes.
         remote_done = f"{work_dir}/encode.done"
         remote_failed = f"{work_dir}/encode.failed"
         remote_log = f"{work_dir}/ffmpeg.log"
@@ -652,7 +705,6 @@ def _assemble_video_remote(script, post_id, cfg, segments, durations,
         t0 = time.time()
         _run_cmd(ssh_base + [launch_script], "ssh launch ffmpeg")
 
-        # Poll until the sentinel appears (check every 15 seconds)
         poll_interval = 15
         while True:
             time.sleep(poll_interval)
@@ -670,7 +722,6 @@ def _assemble_video_remote(script, post_id, cfg, segments, durations,
                 log.info("[%s] Remote FFmpeg finished in %.1fs", post_id, elapsed)
                 break
             elif status == "failed":
-                # Fetch the ffmpeg log for diagnosis before cleanup
                 ffmpeg_log_result = subprocess.run(
                     ssh_base + ["tail", "-50", remote_log],
                     capture_output=True, text=True,
@@ -681,7 +732,6 @@ def _assemble_video_remote(script, post_id, cfg, segments, durations,
             else:
                 log.info("[%s] Remote FFmpeg still running... %.0fs elapsed", post_id, elapsed)
 
-        # rsync result back
         log.info("[%s] rsync output.mp4 back to %s...", post_id, output_path)
         _run_cmd(
             ["rsync", "-a", "-e", ssh_e, f"{remote}:{remote_output}", output_path],
@@ -689,7 +739,6 @@ def _assemble_video_remote(script, post_id, cfg, segments, durations,
         )
 
     finally:
-        # Clean up remote work directory whether encode succeeded or failed
         log.info("[%s] Cleaning up remote work dir %s...", post_id, work_dir)
         cleanup = subprocess.run(
             ssh_base + ["rm", "-rf", work_dir],
@@ -699,72 +748,44 @@ def _assemble_video_remote(script, post_id, cfg, segments, durations,
             log.warning("[%s] Remote cleanup failed (non-fatal)", post_id)
 
 
-def _slug(title):
-    s = title.lower()
-    s = re.sub(r'[^a-z0-9]+', '-', s)
-    return s.strip('-')
-
-
-def _db_prefix(cfg):
-    db = cfg['paths']['db']
-    return 'ko' if 'kombativ' in db else 'km'
-
-
-def assemble_video(script, post_id, cfg, post_title):
+def assemble_video(script, post_id, cfg, post_title, durations):
     log.info("[%s] Assembling video with FFmpeg...", post_id)
 
-    ram = psutil.virtual_memory()
-    log.info(
-        "[%s] RAM before FFmpeg: %.1fGB used / %.1fGB total",
-        post_id,
-        ram.used / 1e9,
-        ram.total / 1e9,
-    )
-
     ff = cfg["ffmpeg"]
-    images_dir = os.path.join(cfg["paths"]["images"], str(post_id))
+    video_clips_dir = os.path.join(cfg["paths"]["video_clips"], str(post_id))
     audio_dir = os.path.join(cfg["paths"]["audio"], str(post_id))
     subtitles_path = os.path.join(cfg["paths"]["subtitles"], f"{post_id}.ass")
     output_path = os.path.join(cfg["paths"]["videos"], f"{_db_prefix(cfg)}{post_id}-{_slug(post_title)}.mp4")
     segments = script["segments"]
     n = len(segments)
 
-    # Get exact audio duration for each segment so we can trim the looped image
-    # precisely — avoids -shortest which is unreliable with many stream-looped inputs.
-    log.info("[%s] Probing audio durations...", post_id)
-    durations = []
-    for seg in segments:
-        aud = os.path.join(audio_dir, f"segment_{seg['index']}.mp3")
-        durations.append(_get_audio_duration(aud))
-    log.info("[%s] Total video duration: %.1fs", post_id, sum(durations))
-
     render_mode = cfg.get("rendering", {}).get("mode", "local")
 
     if render_mode == "remote":
         _assemble_video_remote(
             script, post_id, cfg, segments, durations,
-            images_dir, audio_dir, subtitles_path, output_path, ff,
+            video_clips_dir, audio_dir, subtitles_path, output_path, ff,
         )
         log.info("[%s] Video assembled (remote): %s", post_id, output_path)
         return output_path
 
-    # ── Local rendering (default, unchanged behaviour) ────────────────────────
+    # ── Local rendering ───────────────────────────────────────────────────────
 
-    # Build filter_complex — written to a temp file to avoid ARG_MAX limits.
-    # Escape the subtitles path for filtergraph syntax (: must be \:).
-    filter_script = _build_filter_script(segments, durations, subtitles_path, ff)
+    filter_script = _build_video_filter(
+        segments, audio_dir, video_clips_dir, post_id, subtitles_path, ff
+    )
 
     fc_file = os.path.join(cfg["paths"]["videos"], f"{post_id}_fc.txt")
     with open(fc_file, "w") as f:
         f.write(filter_script)
 
-    # Use -loop 1 -t <duration> per image so each image stream has a defined
-    # endpoint — no -stream_loop -1 and no -shortest needed.
     cmd = ["ffmpeg", "-y"]
-    for seg, duration in zip(segments, durations):
-        img = os.path.join(images_dir, f"segment_{seg['index']}.jpg")
-        aud = os.path.join(audio_dir, f"segment_{seg['index']}.mp3")
-        cmd += ["-loop", "1", "-t", f"{duration:.6f}", "-i", img, "-i", aud]
+    for seg in segments:
+        idx = seg["index"]
+        clip = os.path.join(video_clips_dir, f"segment_{idx}.mp4")
+        aud = os.path.join(audio_dir, f"segment_{idx}.mp3")
+        aud_dur = durations.get(idx, cfg["video_gen"]["duration_fallback_seconds"])
+        cmd += ["-t", f"{aud_dur:.6f}", "-i", clip, "-t", f"{aud_dur:.6f}", "-i", aud]
 
     cmd += [
         "-filter_complex_script", fc_file,
@@ -776,13 +797,11 @@ def assemble_video(script, post_id, cfg, post_title):
         "-pix_fmt", "yuv420p",
         "-c:a", ff["audio_codec"],
         "-threads", str(ff["threads"]),
-        "-max_muxing_queue_size", str(ff["max_muxing_queue_size"]),
         "-movflags", "+faststart",
         output_path,
     ]
 
-    log.info("[%s] FFmpeg: %d segments, total %.1fs, filter script: %s",
-             post_id, n, sum(durations), fc_file)
+    log.info("[%s] FFmpeg: %d segments, filter script: %s", post_id, n, fc_file)
 
     t0 = time.time()
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -800,7 +819,7 @@ def assemble_video(script, post_id, cfg, post_title):
     return output_path
 
 
-# ── Step 7: Social media copy ─────────────────────────────────────────────────
+# ── Step 8: Social media copy ─────────────────────────────────────────────────
 
 
 SOCIAL_COPY_PROMPT = """\
@@ -886,7 +905,7 @@ async def process_post(post, cfg, resume=False):
     log.info("=" * 60)
     log.info("[%s] Processing: %s (resume=%s)", post_id, post["post_title"], resume)
 
-    # Step 2 — skip script generation if resuming and script already exists
+    # Step 2 — script
     script_path = os.path.join(cfg["paths"]["scripts"], f"{post_id}-script.json")
     if resume and os.path.exists(script_path):
         log.info("[%s] Script exists, skipping generation.", post_id)
@@ -897,27 +916,27 @@ async def process_post(post, cfg, resume=False):
         script = await generate_script(post, cfg)
         log.info("[%s] Script generated in %.1fs", post_id, time.time() - t)
 
-    # Step 3
+    # Steps 3+4 — audio + video clips
     t = time.time()
-    await generate_all_assets(script, post_id, cfg, resume=resume)
+    durations = await generate_all_assets(script, post_id, cfg, resume=resume)
     log.info("[%s] Assets generated in %.1fs", post_id, time.time() - t)
 
-    # Step 4
+    # Step 5 — transcribe
     t = time.time()
     word_timestamps = transcribe_segments(script, post_id, cfg)
     log.info("[%s] Transcription done in %.1fs", post_id, time.time() - t)
 
-    # Step 5
+    # Step 6 — subtitles
     t = time.time()
     build_ass(script, word_timestamps, post_id, cfg)
     log.info("[%s] Subtitles built in %.1fs", post_id, time.time() - t)
 
-    # Step 6
+    # Step 7 — assemble
     t = time.time()
-    video_path = assemble_video(script, post_id, cfg, post["post_title"])
+    video_path = assemble_video(script, post_id, cfg, post["post_title"], durations)
     log.info("[%s] Video assembled in %.1fs", post_id, time.time() - t)
 
-    # Step 7
+    # Step 8 — social copy
     t = time.time()
     await generate_social_copy(post, cfg, video_path)
     log.info("[%s] Social copy generated in %.1fs", post_id, time.time() - t)
@@ -928,7 +947,7 @@ async def process_post(post, cfg, resume=False):
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--post-id', type=int, default=None)
+    parser.add_argument('--post-id', type=str, default=None)
     parser.add_argument('--resume', action='store_true', help='Skip assets that already exist on disk')
     parser.add_argument('--force', action='store_true', help='Re-process a post regardless of its current status')
     args = parser.parse_args()
@@ -949,7 +968,10 @@ def main():
                 log.info("Post %s not found or not pending. Exiting.", args.post_id)
                 return
             if args.force:
-                conn.execute("UPDATE blog_posts SET status = 'pending', error_message = NULL, processed_at = NULL WHERE post_id = ?", (args.post_id,))
+                conn.execute(
+                    "UPDATE blog_posts SET status = 'pending', error_message = NULL, processed_at = NULL WHERE post_id = ?",
+                    (args.post_id,)
+                )
                 conn.commit()
                 log.info("[%s] Status reset to pending (--force).", args.post_id)
             cols = [d[0] for d in cur.description]

@@ -1,69 +1,63 @@
 api:
-  openrouter_base_url: https://openrouter.ai/api/v1
+  openrouter_base_url: "https://openrouter.ai/api/v1"
+  # openrouter_api_key is injected at runtime from ~/OPENROUTER_API_KEY.txt
+
+models:
+  script_writer: "anthropic/claude-sonnet-4-6"
+  tts: "google/gemini-3.1-flash-tts-preview"
+  video: "kling/kling-video-1.0-standard-text2video"
+  whisper: "tiny"
+
+voice:
+  narrator_voice: "Charon"
+  style_instructions: "Confident, direct, slightly dramatic. Clear diction. Fast pace."
+
 ffmpeg:
-  audio_codec: aac
+  video_codec: "libx264"
+  audio_codec: "aac"
   crf: 26
   fps: 24
-  kenburns_scale: 1.15
-  max_muxing_queue_size: 1024
-  output_height: 1920
-  output_width: 1080
-  preset: faster
+  preset: "faster"
   threads: 8
-  video_codec: libx264
-images:
-  output_format: jpeg
-  quality: 85
-  resolution_height: 640
-  resolution_width: 360
-  style_prompt_prefix: "dramatic cinematic photography, dark moody atmosphere, single\
-    \ subject, \nsharp focus, studio lighting with rim light, black background, \n\
-    photorealistic, martial arts subject matter,"
-models:
-  image: x-ai/grok-imagine-image-quality
-  script_writer: anthropic/claude-sonnet-4-6
-  tts: google/gemini-3.1-flash-tts-preview
-  whisper: tiny
-paths:
-  audio: /mnt/storage/vertical-posts/audio
-  db: /mnt/storage/vertical-posts/data/blog_posts_kombativ.db
-  images: /mnt/storage/vertical-posts/images
-  logs: /mnt/storage/vertical-posts/logs
-  script_writer_prompt: /home/ian/vertical-posts/prompts/script-writer.txt
-  scripts: /mnt/storage/vertical-posts/scripts
-  subtitles: /mnt/storage/vertical-posts/subtitles
-  videos: /mnt/storage/vertical-posts/videos
-pipeline:
-  inter_post_sleep_seconds: 2
-  max_concurrent_requests: 20
-  retry_attempts: 3
-  retry_backoff_seconds: 2
-rendering:
-  mode: remote
-  remote_host: 192.168.86.250
-  remote_port: 22022
-  remote_user: ian
-  remote_work_dir: /tmp/vertical-posts-render
-script:
-  target_duration_max_seconds: 150
-  target_duration_min_seconds: 120
-  target_segment_duration_seconds: 3.5
-subtitles:
-  bold: true
-  font: Arial
-  font_size: 88
-  outline_color: black
-  outline_thickness: 3
-  primary_color: white
-  shadow_depth: 1
-  vertical_position_percent: 75
-  words_per_cue: 1
-voice:
-  narrator_voice: Charon
-  output_format: mp3
-  speed: 1.15
-  style_instructions: 'Speak with confident, enthusiastic authority — like a martial
-    arts expert who genuinely loves this stuff. Energetic but not frantic. Clear diction.
-    Fast pace. No filler words.
 
-    '
+video_gen:
+  duration_fallback_seconds: 8
+  motion_style: "slow cinematic camera movement, dramatic lighting, high detail"
+  resolution: "1080x1920"
+
+paths:
+  db: "/mnt/storage/video-posts/data/blog_posts.db"
+  db_karate: "/mnt/storage/video-posts/data/blog_posts.db"
+  db_kombativ: "/mnt/storage/video-posts/data/blog_posts_kombativ.db"
+  audio: "/mnt/storage/video-posts/audio"
+  video_clips: "/mnt/storage/video-posts/video-clips"
+  scripts: "/mnt/storage/video-posts/scripts"
+  subtitles: "/mnt/storage/video-posts/subtitles"
+  videos: "/mnt/storage/video-posts/videos"
+  logs: "/mnt/storage/video-posts/logs"
+  prompts: "/home/ian/video-posts/prompts"
+
+pipeline:
+  max_concurrent_requests: 3
+  retry_attempts: 3
+  retry_backoff_seconds: 5
+
+script:
+  target_clips_min: 2
+  target_clips_max: 3
+
+subtitles:
+  font: "Arial"
+  font_size: 88
+  bold: true
+  primary_color: "&H00FFFFFF"
+  outline_color: "&H00000000"
+  outline_width: 3
+  vertical_position_percent: 75
+
+rendering:
+  mode: "remote"
+  remote_host: "192.168.86.250"
+  remote_port: 22022
+  remote_user: "ian"
+  remote_work_dir: "/tmp/video-posts-render"
