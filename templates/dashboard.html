@@ -1,0 +1,916 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vertical Posts</title>
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+<style>
+:root {
+  --bg: #0f1117;
+  --surface: #1a1d27;
+  --border: #2a2d3a;
+  --text: #e2e8f0;
+  --text-muted: #64748b;
+  --accent: #6366f1;
+  --accent-hover: #4f46e5;
+  --success: #22c55e;
+  --warning: #f59e0b;
+  --error: #ef4444;
+  --processing: #3b82f6;
+  --log-bg: #080a0f;
+  --log-text: #a3e635;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+  overflow: hidden;
+}
+
+/* ── Header ── */
+#header {
+  height: 48px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  flex-shrink: 0;
+}
+
+#header h1 {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+
+#live-indicator {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+#live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: background 0.3s;
+}
+
+#live-dot.live {
+  background: var(--success);
+  animation: pulse-dot 2s infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* ── Main layout ── */
+#main {
+  display: flex;
+  height: calc(100vh - 48px);
+}
+
+/* ── Columns ── */
+.col {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+
+#col-posts  { width: 25%; }
+#col-log    { width: 45%; }
+#col-settings { width: 30%; border-right: none; }
+
+.col-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.col-header h2 {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* ── Buttons ── */
+button {
+  cursor: pointer;
+  border: none;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 12px;
+  transition: background 0.15s, opacity 0.15s;
+}
+
+button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.btn-accent {
+  background: var(--accent);
+  color: #fff;
+}
+.btn-accent:hover:not(:disabled) { background: var(--accent-hover); }
+
+.btn-danger {
+  background: var(--error);
+  color: #fff;
+}
+.btn-danger:hover:not(:disabled) { background: #dc2626; }
+
+.btn-warning {
+  background: #d97706;
+  color: #fff;
+}
+.btn-warning:hover:not(:disabled) { background: #b45309; }
+
+.retry-actions { display: inline-flex; gap: 4px; }
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+.btn-ghost:hover:not(:disabled) { color: var(--text); border-color: var(--text-muted); }
+
+.btn-sm {
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+/* ── Post list ── */
+#post-toolbar {
+  display: flex;
+  gap: 6px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+#post-list-wrap {
+  flex: 1;
+  overflow-y: auto;
+}
+
+#post-list {
+  list-style: none;
+}
+
+#post-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+  transition: background 0.1s;
+}
+
+#post-list li:hover { background: var(--surface); }
+
+#post-list input[type=checkbox] {
+  accent-color: var(--accent);
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+}
+
+.post-id {
+  font-family: monospace;
+  color: var(--text-muted);
+  font-size: 11px;
+  min-width: 36px;
+  flex-shrink: 0;
+}
+
+.post-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pill {
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+}
+
+.pill-pending   { background: #2a2d3a; color: var(--text-muted); }
+.pill-processing { background: rgba(59,130,246,0.2); color: var(--processing); animation: pulse-pill 1.5s infinite; }
+.pill-done      { background: rgba(34,197,94,0.15); color: var(--success); }
+.pill-failed    { background: rgba(239,68,68,0.15); color: var(--error); }
+
+@keyframes pulse-pill {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+#run-controls {
+  display: flex;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+#run-controls button { flex: 1; padding: 7px; }
+
+#badge {
+  background: var(--bg);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 10px;
+  margin-left: 6px;
+}
+
+/* ── Log ── */
+#log-wrap {
+  flex: 1;
+  overflow-y: auto;
+  background: var(--log-bg);
+  padding: 10px 14px;
+}
+
+#log-output {
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--log-text);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.log-ts {
+  color: #4a5568;
+  margin-right: 8px;
+  user-select: none;
+}
+
+/* ── Settings ── */
+#settings-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px;
+}
+
+.settings-section {
+  margin-bottom: 20px;
+}
+
+.settings-section h3 {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.field {
+  margin-bottom: 12px;
+}
+
+.field label {
+  display: block;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.field select,
+.field input[type=text],
+.field textarea {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 6px 8px;
+  font-family: inherit;
+  transition: border-color 0.15s;
+}
+
+.field select:focus,
+.field input[type=text]:focus,
+.field textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.field textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.other-input {
+  margin-top: 6px;
+}
+
+#save-row {
+  padding: 0 14px 14px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+#btn-save {
+  flex: 1;
+  padding: 8px;
+}
+
+#save-status {
+  font-size: 12px;
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+
+#save-status.show { opacity: 1; }
+#save-status.ok   { color: var(--success); }
+#save-status.err  { color: var(--error); }
+
+/* Scrollbars */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <h1>Vertical Posts</h1>
+  <div id="live-indicator">
+    <div id="live-dot"></div>
+    <span id="live-label">Idle</span>
+  </div>
+</div>
+
+<div id="main">
+
+  <!-- Left: Post List -->
+  <div class="col" id="col-posts">
+    <div class="col-header">
+      <h2>Posts <span id="badge">—</span></h2>
+    </div>
+    <div id="post-toolbar">
+      <button class="btn-ghost btn-sm" onclick="selectAll()">Select All</button>
+      <button class="btn-ghost btn-sm" onclick="deselectAll()">Deselect All</button>
+    </div>
+    <div id="post-list-wrap">
+      <ul id="post-list"></ul>
+    </div>
+    <div id="run-controls">
+      <button id="btn-run" class="btn-accent" onclick="doRun()">Run</button>
+      <button id="btn-stop" class="btn-danger" onclick="doStop()" disabled>Stop</button>
+    </div>
+  </div>
+
+  <!-- Center: Log -->
+  <div class="col" id="col-log">
+    <div class="col-header">
+      <h2>Live Output</h2>
+      <button class="btn-ghost btn-sm" onclick="clearLog()">Clear</button>
+    </div>
+    <div id="log-wrap">
+      <div id="log-output"></div>
+    </div>
+  </div>
+
+  <!-- Right: Settings -->
+  <div class="col" id="col-settings">
+    <div class="col-header">
+      <h2>Settings</h2>
+    </div>
+    <div id="settings-scroll">
+
+      <div class="settings-section">
+        <h3>Database</h3>
+        <div class="field">
+          <label>Active Source</label>
+          <select id="db-source" onchange="switchDb(this.value)">
+            <option value="karate">KarateMart</option>
+            <option value="kombativ">Kombativ</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h3>Models</h3>
+
+        <div class="field">
+          <label>Script Writer</label>
+          <select id="model-script" onchange="handleOther(this,'model-script-other')">
+            <option value="anthropic/claude-sonnet-4-6">anthropic/claude-sonnet-4-6</option>
+            <option value="anthropic/claude-opus-4-5">anthropic/claude-opus-4-5</option>
+            <option value="openai/gpt-4o">openai/gpt-4o</option>
+            <option value="openai/gpt-4o-mini">openai/gpt-4o-mini</option>
+            <option value="google/gemini-2.5-pro-preview">google/gemini-2.5-pro-preview</option>
+            <option value="google/gemini-2.5-flash-preview">google/gemini-2.5-flash-preview</option>
+            <option value="__other__">Other...</option>
+          </select>
+          <input type="text" id="model-script-other" class="other-input" placeholder="model string" style="display:none">
+        </div>
+
+        <div class="field">
+          <label>TTS</label>
+          <select id="model-tts" onchange="handleOther(this,'model-tts-other')">
+            <option value="google/gemini-2.5-flash-preview-tts">google/gemini-2.5-flash-preview-tts</option>
+            <option value="google/gemini-2.5-pro-preview-tts">google/gemini-2.5-pro-preview-tts</option>
+            <option value="openai/tts-1">openai/tts-1</option>
+            <option value="openai/tts-1-hd">openai/tts-1-hd</option>
+            <option value="__other__">Other...</option>
+          </select>
+          <input type="text" id="model-tts-other" class="other-input" placeholder="model string" style="display:none">
+        </div>
+
+        <div class="field">
+          <label>Image Generator</label>
+          <select id="model-image" onchange="handleOther(this,'model-image-other')">
+            <option value="google/gemini-2.0-flash-preview-image-generation">google/gemini-2.0-flash-preview-image-generation</option>
+            <option value="google/gemini-2.5-flash-preview-image-generation">google/gemini-2.5-flash-preview-image-generation</option>
+            <option value="openai/dall-e-3">openai/dall-e-3</option>
+            <option value="openai/dall-e-2">openai/dall-e-2</option>
+            <option value="__other__">Other...</option>
+          </select>
+          <input type="text" id="model-image-other" class="other-input" placeholder="model string" style="display:none">
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h3>Video</h3>
+
+        <div class="field">
+          <label>FPS</label>
+          <input type="text" id="ffmpeg-fps">
+        </div>
+
+        <div class="field">
+          <label>Ken Burns Scale</label>
+          <input type="text" id="ffmpeg-kenburns-scale">
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h3>Script</h3>
+
+        <div class="field">
+          <label>Min Duration (seconds)</label>
+          <input type="text" id="script-min-duration">
+        </div>
+
+        <div class="field">
+          <label>Max Duration (seconds)</label>
+          <input type="text" id="script-max-duration">
+        </div>
+
+        <div class="field">
+          <label>Segment Duration (seconds)</label>
+          <input type="text" id="script-segment-duration">
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h3>Prompts</h3>
+
+        <div class="field">
+          <label>Image Style</label>
+          <textarea id="image-style" rows="4"></textarea>
+        </div>
+
+        <div class="field">
+          <label>Voice Style</label>
+          <textarea id="voice-style" rows="4"></textarea>
+        </div>
+
+        <div class="field">
+          <label>Script Writer Prompt File</label>
+          <input type="text" id="prompt-file">
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h3>Rendering</h3>
+
+        <div class="field">
+          <label>Mode</label>
+          <select id="rendering-mode" onchange="toggleRemoteFields()">
+            <option value="local">Local</option>
+            <option value="remote">Remote</option>
+          </select>
+        </div>
+
+        <div id="remote-fields">
+          <div class="field">
+            <label>Remote Host</label>
+            <input type="text" id="rendering-host">
+          </div>
+          <div class="field">
+            <label>Remote User</label>
+            <input type="text" id="rendering-user">
+          </div>
+          <div class="field">
+            <label>Remote Port</label>
+            <input type="text" id="rendering-port">
+          </div>
+          <div class="field">
+            <label>Remote Work Dir</label>
+            <input type="text" id="rendering-work-dir">
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <div id="save-row">
+      <button id="btn-save" class="btn-accent" onclick="doSave()">Save</button>
+      <span id="save-status"></span>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ── Socket ─────────────────────────────────────────────────────────────────
+const socket = io();
+let userScrolled = false;
+
+socket.on('connect', () => {
+  document.getElementById('live-dot').classList.add('live');
+  document.getElementById('live-label').textContent = 'Connected';
+});
+
+socket.on('disconnect', () => {
+  document.getElementById('live-dot').classList.remove('live');
+  document.getElementById('live-label').textContent = 'Disconnected';
+});
+
+socket.on('log', data => appendLog(data.line));
+
+socket.on('run_complete', () => {
+  setRunning(false);
+  refreshPosts();
+  fetchStatus();
+});
+
+// ── Log ────────────────────────────────────────────────────────────────────
+const logWrap = document.getElementById('log-wrap');
+const logOutput = document.getElementById('log-output');
+
+logWrap.addEventListener('scroll', () => {
+  const atBottom = logWrap.scrollTop + logWrap.clientHeight >= logWrap.scrollHeight - 10;
+  userScrolled = !atBottom;
+});
+
+function ts() {
+  const d = new Date();
+  return [d.getHours(), d.getMinutes(), d.getSeconds()]
+    .map(n => String(n).padStart(2, '0')).join(':');
+}
+
+function appendLog(line) {
+  const span = document.createElement('span');
+  span.innerHTML = `<span class="log-ts">${ts()}</span>${escHtml(line)}\n`;
+  logOutput.appendChild(span);
+  if (!userScrolled) logWrap.scrollTop = logWrap.scrollHeight;
+}
+
+function clearLog() {
+  logOutput.innerHTML = '';
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Post list ──────────────────────────────────────────────────────────────
+let postData = [];
+
+async function fetchPosts() {
+  const res = await fetch('/api/posts');
+  postData = await res.json();
+  renderPosts(postData);
+}
+
+function renderPosts(posts) {
+  const ul = document.getElementById('post-list');
+  ul.innerHTML = '';
+  posts.forEach(p => {
+    const li = document.createElement('li');
+    li.dataset.postId = p.post_id;
+
+    const chk = document.createElement('input');
+    chk.type = 'checkbox';
+    chk.id = `chk-${p.post_id}`;
+    chk.checked = p.status === 'pending';
+
+    const idSpan = document.createElement('span');
+    idSpan.className = 'post-id';
+    idSpan.textContent = p.post_id;
+
+    const titleSpan = document.createElement('span');
+    titleSpan.className = 'post-title';
+    titleSpan.title = p.post_title;
+    titleSpan.textContent = p.post_title;
+
+    const pill = makePill(p.status);
+
+    li.appendChild(chk);
+    li.appendChild(idSpan);
+    li.appendChild(titleSpan);
+    li.appendChild(pill);
+
+    if (p.status === 'failed' || p.status === 'done') {
+      li.appendChild(makeRetryButtons(p.post_id));
+    }
+
+    ul.appendChild(li);
+  });
+}
+
+function makePill(status) {
+  const span = document.createElement('span');
+  span.className = `pill pill-${status}`;
+  span.textContent = status;
+  return span;
+}
+
+async function refreshPosts() {
+  const res = await fetch('/api/posts');
+  const fresh = await res.json();
+  postData = fresh;
+
+  fresh.forEach(p => {
+    const li = document.querySelector(`li[data-post-id="${p.post_id}"]`);
+    if (!li) return;
+
+    // Update pill
+    const oldPill = li.querySelector('.pill');
+    if (oldPill) oldPill.replaceWith(makePill(p.status));
+
+    // Update retry buttons
+    const existing = li.querySelector('.retry-actions');
+    if ((p.status === 'failed' || p.status === 'done') && !existing) {
+      li.appendChild(makeRetryButtons(p.post_id));
+    } else if (p.status !== 'failed' && p.status !== 'done' && existing) {
+      existing.remove();
+    }
+  });
+}
+
+function selectAll() {
+  document.querySelectorAll('#post-list input[type=checkbox]').forEach(c => c.checked = true);
+}
+
+function deselectAll() {
+  document.querySelectorAll('#post-list input[type=checkbox]').forEach(c => c.checked = false);
+}
+
+// ── Status badge ───────────────────────────────────────────────────────────
+async function fetchStatus() {
+  const res = await fetch('/api/status');
+  const s = await res.json();
+  const total = (s.pending||0) + (s.processing||0) + (s.done||0) + (s.failed||0);
+  document.getElementById('badge').textContent = `${s.done||0} / ${total}`;
+}
+
+// ── Run / Stop ─────────────────────────────────────────────────────────────
+function setRunning(running) {
+  document.getElementById('btn-run').disabled = running;
+  document.getElementById('btn-stop').disabled = !running;
+  document.getElementById('live-label').textContent = running ? 'Running' : 'Idle';
+}
+
+async function doRun() {
+  const checked = [...document.querySelectorAll('#post-list input[type=checkbox]:checked')]
+    .map(c => parseInt(c.id.replace('chk-', '')));
+  if (!checked.length) { alert('No posts selected'); return; }
+
+  const res = await fetch('/api/run', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({post_ids: checked})
+  });
+  const data = await res.json();
+  if (data.error) { alert(data.error); return; }
+  setRunning(true);
+}
+
+async function doStop() {
+  await fetch('/api/stop', {method: 'POST'});
+}
+
+function makeRetryButtons(post_id) {
+  const wrap = document.createElement('span');
+  wrap.className = 'retry-actions';
+
+  const resumeBtn = document.createElement('button');
+  resumeBtn.className = 'btn-warning btn-sm';
+  resumeBtn.textContent = 'Resume';
+  resumeBtn.title = 'Skip already-generated assets and continue where it left off';
+  resumeBtn.onclick = () => doRetry(post_id, 'resume');
+
+  const resetBtn = document.createElement('button');
+  resetBtn.className = 'btn-danger btn-sm';
+  resetBtn.textContent = 'Reset';
+  resetBtn.title = 'Delete all generated files and start from scratch';
+  resetBtn.onclick = () => doRetry(post_id, 'reset');
+
+  wrap.appendChild(resumeBtn);
+  wrap.appendChild(resetBtn);
+  return wrap;
+}
+
+async function doRetry(post_id, mode) {
+  await fetch('/api/retry', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({post_id, mode})
+  });
+  await refreshPosts();
+  await fetchStatus();
+}
+
+// ── Database selector ──────────────────────────────────────────────────────
+async function switchDb(source) {
+  const sel = document.getElementById('db-source');
+  sel.disabled = true;
+  try {
+    await fetch('/api/switch-db', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({source})
+    });
+    await fetchPosts();
+    await fetchStatus();
+  } finally {
+    sel.disabled = false;
+  }
+}
+
+// ── Settings ───────────────────────────────────────────────────────────────
+function toggleRemoteFields() {
+  const isRemote = document.getElementById('rendering-mode').value === 'remote';
+  document.getElementById('remote-fields').style.display = isRemote ? 'block' : 'none';
+}
+
+function handleOther(sel, otherId) {
+  const inp = document.getElementById(otherId);
+  inp.style.display = sel.value === '__other__' ? 'block' : 'none';
+}
+
+function setSelectValue(selId, otherId, val) {
+  const sel = document.getElementById(selId);
+  let found = false;
+  for (const opt of sel.options) {
+    if (opt.value === val) { sel.value = val; found = true; break; }
+  }
+  if (!found) {
+    sel.value = '__other__';
+    const inp = document.getElementById(otherId);
+    inp.style.display = 'block';
+    inp.value = val;
+  }
+}
+
+function getModelValue(selId, otherId) {
+  const sel = document.getElementById(selId);
+  if (sel.value === '__other__') return document.getElementById(otherId).value.trim();
+  return sel.value;
+}
+
+async function loadConfig() {
+  const [res, srcRes] = await Promise.all([fetch('/api/config'), fetch('/api/db-source')]);
+  const cfg = await res.json();
+  const src = await srcRes.json();
+  const dbSel = document.getElementById('db-source');
+  if (dbSel && (src.source === 'karate' || src.source === 'kombativ')) {
+    dbSel.value = src.source;
+  }
+
+  setSelectValue('model-script', 'model-script-other', cfg.models?.script_writer || '');
+  setSelectValue('model-tts',    'model-tts-other',    cfg.models?.tts || '');
+  setSelectValue('model-image',  'model-image-other',  cfg.models?.image || '');
+
+  document.getElementById('ffmpeg-fps').value            = cfg.ffmpeg?.fps ?? 30;
+  document.getElementById('ffmpeg-kenburns-scale').value = cfg.ffmpeg?.kenburns_scale ?? 1.3;
+
+  document.getElementById('script-min-duration').value     = cfg.script?.target_duration_min_seconds ?? 150;
+  document.getElementById('script-max-duration').value     = cfg.script?.target_duration_max_seconds ?? 180;
+  document.getElementById('script-segment-duration').value = cfg.script?.target_segment_duration_seconds ?? 4;
+
+  document.getElementById('image-style').value  = cfg.images?.style_prompt_prefix || '';
+  document.getElementById('voice-style').value  = cfg.voice?.style_instructions || '';
+  document.getElementById('prompt-file').value  = cfg.paths?.script_writer_prompt || '';
+
+  document.getElementById('rendering-mode').value    = cfg.rendering?.mode || 'local';
+  document.getElementById('rendering-host').value    = cfg.rendering?.remote_host || '';
+  document.getElementById('rendering-user').value    = cfg.rendering?.remote_user || '';
+  document.getElementById('rendering-port').value    = cfg.rendering?.remote_port || '';
+  document.getElementById('rendering-work-dir').value = cfg.rendering?.remote_work_dir || '';
+  toggleRemoteFields();
+}
+
+async function doSave() {
+  const payload = {
+    'models.script_writer': getModelValue('model-script', 'model-script-other'),
+    'models.tts':           getModelValue('model-tts',    'model-tts-other'),
+    'models.image':         getModelValue('model-image',  'model-image-other'),
+    'ffmpeg.fps':            parseFloat(document.getElementById('ffmpeg-fps').value),
+    'ffmpeg.kenburns_scale': parseFloat(document.getElementById('ffmpeg-kenburns-scale').value),
+    'script.target_duration_min_seconds':     parseInt(document.getElementById('script-min-duration').value) || 150,
+    'script.target_duration_max_seconds':     parseInt(document.getElementById('script-max-duration').value) || 180,
+    'script.target_segment_duration_seconds': parseFloat(document.getElementById('script-segment-duration').value) || 4,
+    'images.style_prompt_prefix':   document.getElementById('image-style').value,
+    'voice.style_instructions':     document.getElementById('voice-style').value,
+    'paths.script_writer_prompt':   document.getElementById('prompt-file').value,
+    'rendering.mode':               document.getElementById('rendering-mode').value,
+    'rendering.remote_host':        document.getElementById('rendering-host').value,
+    'rendering.remote_user':        document.getElementById('rendering-user').value,
+    'rendering.remote_port':        parseInt(document.getElementById('rendering-port').value) || 22,
+    'rendering.remote_work_dir':    document.getElementById('rendering-work-dir').value,
+  };
+
+  const statusEl = document.getElementById('save-status');
+  statusEl.className = '';
+  statusEl.textContent = '';
+
+  try {
+    const res = await fetch('/api/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (data.ok) {
+      statusEl.textContent = 'Saved ✓';
+      statusEl.className = 'show ok';
+    } else {
+      throw new Error('Server error');
+    }
+  } catch (e) {
+    statusEl.textContent = 'Save failed';
+    statusEl.className = 'show err';
+  }
+
+  setTimeout(() => { statusEl.className = ''; }, 2000);
+}
+
+// ── Pipeline status poll ───────────────────────────────────────────────────
+async function checkPipelineStatus() {
+  const res = await fetch('/api/pipeline-status');
+  const s = await res.json();
+  setRunning(s.running);
+}
+
+// ── Auto-refresh ───────────────────────────────────────────────────────────
+setInterval(async () => {
+  await refreshPosts();
+  await fetchStatus();
+}, 5000);
+
+// ── Init ───────────────────────────────────────────────────────────────────
+(async () => {
+  await fetchPosts();
+  await loadConfig();
+  await checkPipelineStatus();
+  await fetchStatus();
+})();
+</script>
+</body>
+</html>
