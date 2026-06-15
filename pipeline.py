@@ -238,21 +238,27 @@ def _get_audio_duration(audio_path):
 
 
 async def submit_video_job(session, segment, duration_seconds, cfg):
-    """Submit a text-to-video job to OpenRouter and return the job ID or direct video URL."""
+    """Submit a text-to-video job to POST /api/v1/videos and return the job ID."""
     index = segment["index"]
     post_id = segment.get("_post_id", "?")
 
-    motion_style = cfg["video_gen"]["motion_style"]
-    prompt = f"{motion_style}, {segment['video_prompt']}"
+    vg = cfg["video_gen"]
+    prompt = f"{vg['motion_style']}, {segment['video_prompt']}"
+
+    # Clamp duration to API limits (1–15 seconds)
+    duration = max(1, min(15, int(duration_seconds)))
 
     headers = {
         "Authorization": f"Bearer {cfg['api']['openrouter_api_key']}",
         "Content-Type": "application/json",
+        "HTTP-Referer": "https://video-posts",
     }
     payload = {
         "model": cfg["models"]["video"],
-        "messages": [{"role": "user", "content": prompt}],
-        "duration": int(duration_seconds),
+        "prompt": prompt,
+        "duration": duration,
+        "resolution": vg.get("resolution", "480p"),
+        "aspect_ratio": vg.get("aspect_ratio", "9:16"),
     }
 
     base_url = cfg["api"]["openrouter_base_url"]
@@ -262,110 +268,70 @@ async def submit_video_job(session, segment, duration_seconds, cfg):
     for attempt in range(attempts):
         try:
             async with session.post(
-                f"{base_url}/chat/completions", headers=headers, json=payload
+                f"{base_url}/videos", headers=headers, json=payload
             ) as resp:
                 if resp.status >= 400:
                     body = await resp.text()
                     raise RuntimeError(f"HTTP {resp.status}: {body[:500]}")
                 data = await resp.json()
-                cost = resp.headers.get("x-openrouter-cost")
-                if cost:
-                    log.info("[%s] Video seg %d job cost: $%s", post_id, index, cost)
 
-            # Some models return a generation ID, others return the video URL directly.
-            # Check for a direct video URL in the response first.
-            message = data.get("choices", [{}])[0].get("message", {})
-            content = message.get("content", "")
+            job_id = data.get("id")
+            if not job_id:
+                raise RuntimeError(f"No job ID in submit response: {json.dumps(data)[:300]}")
 
-            # If content is a URL pointing to a video file, return it directly
-            if isinstance(content, str) and (
-                content.startswith("http") and (
-                    ".mp4" in content or ".webm" in content or "video" in content.lower()
-                )
-            ):
-                log.info("[%s] Video seg %d: got direct URL from response.", post_id, index)
-                return content
-
-            # Check for a generation/job ID in the response
-            gen_id = (
-                data.get("id")
-                or data.get("generation_id")
-                or (data.get("choices", [{}])[0].get("message", {}).get("generation_id"))
-            )
-            if gen_id:
-                log.info("[%s] Video seg %d: job ID %s", post_id, index, gen_id)
-                return gen_id
-
-            # If neither, raise so we can debug
-            raise RuntimeError(f"Unexpected video gen response: {json.dumps(data)[:500]}")
+            log.info("[%s] Video seg %d: job submitted, id=%s duration=%ds", post_id, index, job_id, duration)
+            return job_id
 
         except Exception as e:
             if attempt < attempts - 1:
-                log.warning("[%s] Video seg %d job submit attempt %d failed: %s", post_id, index, attempt + 1, e)
+                log.warning("[%s] Video seg %d submit attempt %d failed: %s", post_id, index, attempt + 1, e)
                 await asyncio.sleep(backoff * (attempt + 1))
             else:
                 raise
 
 
-async def poll_video_job(session, job_id_or_url, post_id, segment_index, cfg):
-    """Poll until video clip is ready, then download and save it. Returns local file path."""
+async def poll_video_job(session, job_id, post_id, segment_index, cfg):
+    """Poll GET /api/v1/videos/{id} until completed, then download to disk."""
     out_dir = os.path.join(cfg["paths"]["video_clips"], str(post_id))
     out_path = os.path.join(out_dir, f"segment_{segment_index}.mp4")
 
     base_url = cfg["api"]["openrouter_base_url"]
-    headers = {
-        "Authorization": f"Bearer {cfg['api']['openrouter_api_key']}",
-    }
-
-    async def _download(video_url):
-        log.info("[%s] Video seg %d: downloading from %s", post_id, segment_index, video_url[:80])
-        async with session.get(video_url) as resp:
-            resp.raise_for_status()
-            data = await resp.read()
-        with open(out_path, "wb") as f:
-            f.write(data)
-        log.info("[%s] Video seg %d saved (%d bytes): %s", post_id, segment_index, len(data), out_path)
-        return out_path
-
-    # If we were given a direct URL, skip polling
-    if job_id_or_url.startswith("http"):
-        return await _download(job_id_or_url)
-
-    # Poll the generation endpoint
-    poll_url = f"{base_url}/generation/{job_id_or_url}"
+    auth_headers = {"Authorization": f"Bearer {cfg['api']['openrouter_api_key']}"}
+    poll_url = f"{base_url}/videos/{job_id}"
     deadline = time.time() + 15 * 60  # 15-minute timeout
     poll_interval = 10
 
-    log.info("[%s] Video seg %d: polling job %s...", post_id, segment_index, job_id_or_url)
+    log.info("[%s] Video seg %d: polling %s", post_id, segment_index, poll_url)
+
     while time.time() < deadline:
         await asyncio.sleep(poll_interval)
-        async with session.get(poll_url, headers=headers) as resp:
-            if resp.status == 404:
-                # Some APIs use a different status endpoint
-                log.warning("[%s] Video seg %d: poll 404, retrying in %ds...", post_id, segment_index, poll_interval)
-                continue
+        async with session.get(poll_url, headers=auth_headers) as resp:
             resp.raise_for_status()
             data = await resp.json()
 
         status = data.get("status", "")
-        video_url = (
-            data.get("video_url")
-            or data.get("url")
-            or (data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                if data.get("choices") else "")
-        )
+        cost = data.get("usage", {}).get("cost")
+        if cost:
+            log.info("[%s] Video seg %d cost: $%.4f", post_id, segment_index, cost)
 
-        if status in ("succeeded", "completed", "done") or (
-            isinstance(video_url, str) and video_url.startswith("http")
-        ):
-            if video_url and video_url.startswith("http"):
-                return await _download(video_url)
-            raise RuntimeError(f"Job succeeded but no video URL found: {json.dumps(data)[:300]}")
+        if status == "completed":
+            urls = data.get("unsigned_urls", [])
+            if not urls:
+                raise RuntimeError(f"Status completed but no unsigned_urls: {json.dumps(data)[:300]}")
+            download_url = urls[0]
+            log.info("[%s] Video seg %d: completed, downloading...", post_id, segment_index)
+            async with session.get(download_url, headers=auth_headers) as resp:
+                resp.raise_for_status()
+                video_bytes = await resp.read()
+            with open(out_path, "wb") as f:
+                f.write(video_bytes)
+            log.info("[%s] Video seg %d saved (%d bytes): %s", post_id, segment_index, len(video_bytes), out_path)
+            return out_path
 
-        if status in ("failed", "error", "cancelled"):
-            raise RuntimeError(f"Video generation job failed: {json.dumps(data)[:300]}")
+        if status in ("failed", "error", "expired", "cancelled"):
+            raise RuntimeError(f"Video generation {status}: {json.dumps(data)[:300]}")
 
-        log.info("[%s] Video seg %d: status=%s, waiting...", post_id, segment_index, status or "pending")
+        log.info("[%s] Video seg %d: status=%s, waiting...", post_id, segment_index, status)
 
     raise RuntimeError(f"Video generation timed out after 15 minutes for seg {segment_index}")
 

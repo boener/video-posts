@@ -104,6 +104,8 @@ def post_config():
         'voice.style_instructions': ('voice', 'style_instructions'),
         'video_gen.motion_style': ('video_gen', 'motion_style'),
         'video_gen.duration_fallback_seconds': ('video_gen', 'duration_fallback_seconds'),
+        'video_gen.resolution': ('video_gen', 'resolution'),
+        'video_gen.aspect_ratio': ('video_gen', 'aspect_ratio'),
         'ffmpeg.fps': ('ffmpeg', 'fps'),
         'rendering.mode': ('rendering', 'mode'),
         'rendering.remote_host': ('rendering', 'remote_host'),

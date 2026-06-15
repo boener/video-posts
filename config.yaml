@@ -5,7 +5,7 @@ api:
 models:
   script_writer: "anthropic/claude-sonnet-4-6"
   tts: "google/gemini-3.1-flash-tts-preview"
-  video: "kling/kling-video-1.0-standard-text2video"
+  video: "x-ai/grok-imagine-video"
   whisper: "tiny"
 
 voice:
@@ -23,7 +23,8 @@ ffmpeg:
 video_gen:
   duration_fallback_seconds: 8
   motion_style: "slow cinematic camera movement, dramatic lighting, high detail"
-  resolution: "1080x1920"
+  resolution: "480p"
+  aspect_ratio: "9:16"
 
 paths:
   db: "/mnt/storage/video-posts/data/blog_posts.db"

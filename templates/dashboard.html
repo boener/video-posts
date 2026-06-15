@@ -462,8 +462,7 @@ button:disabled {
         <div class="field">
           <label>Video Generator</label>
           <select id="model-video" onchange="handleOther(this,'model-video-other')">
-            <option value="kling/kling-video-1.0-standard-text2video">kling/kling-video-1.0-standard-text2video</option>
-            <option value="kling/kling-video-1.0-pro-text2video">kling/kling-video-1.0-pro-text2video</option>
+            <option value="x-ai/grok-imagine-video">x-ai/grok-imagine-video</option>
             <option value="minimax/video-01">minimax/video-01</option>
             <option value="__other__">Other...</option>
           </select>
@@ -482,6 +481,26 @@ button:disabled {
         <div class="field">
           <label>Duration Fallback (seconds)</label>
           <input type="text" id="video-duration-fallback">
+        </div>
+
+        <div class="field">
+          <label>Resolution</label>
+          <select id="video-resolution">
+            <option value="480p">480p</option>
+            <option value="720p">720p</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label>Aspect Ratio</label>
+          <select id="video-aspect-ratio">
+            <option value="9:16">9:16 (vertical)</option>
+            <option value="16:9">16:9 (landscape)</option>
+            <option value="1:1">1:1 (square)</option>
+            <option value="4:3">4:3</option>
+            <option value="3:4">3:4</option>
+            <option value="21:9">21:9 (ultrawide)</option>
+          </select>
         </div>
       </div>
 
@@ -809,8 +828,10 @@ async function loadConfig() {
   setSelectValue('model-tts',    'model-tts-other',    cfg.models?.tts || '');
   setSelectValue('model-video',  'model-video-other',  cfg.models?.video || '');
 
-  document.getElementById('video-motion-style').value    = cfg.video_gen?.motion_style || '';
-  document.getElementById('video-duration-fallback').value = cfg.video_gen?.duration_fallback_seconds ?? 8;
+  document.getElementById('video-motion-style').value       = cfg.video_gen?.motion_style || '';
+  document.getElementById('video-duration-fallback').value  = cfg.video_gen?.duration_fallback_seconds ?? 8;
+  document.getElementById('video-resolution').value         = cfg.video_gen?.resolution || '480p';
+  document.getElementById('video-aspect-ratio').value       = cfg.video_gen?.aspect_ratio || '9:16';
 
   document.getElementById('script-clips-min').value = cfg.script?.target_clips_min ?? 2;
   document.getElementById('script-clips-max').value = cfg.script?.target_clips_max ?? 3;
@@ -830,8 +851,10 @@ async function doSave() {
     'models.script_writer':              getModelValue('model-script', 'model-script-other'),
     'models.tts':                        getModelValue('model-tts',    'model-tts-other'),
     'models.video':                      getModelValue('model-video',  'model-video-other'),
-    'video_gen.motion_style':            document.getElementById('video-motion-style').value,
+    'video_gen.motion_style':              document.getElementById('video-motion-style').value,
     'video_gen.duration_fallback_seconds': parseFloat(document.getElementById('video-duration-fallback').value) || 8,
+    'video_gen.resolution':                document.getElementById('video-resolution').value,
+    'video_gen.aspect_ratio':              document.getElementById('video-aspect-ratio').value,
     'script.target_clips_min':           parseInt(document.getElementById('script-clips-min').value) || 2,
     'script.target_clips_max':           parseInt(document.getElementById('script-clips-max').value) || 3,
     'voice.style_instructions':          document.getElementById('voice-style').value,
